@@ -31,7 +31,7 @@ Coherent Device Attribute Table (CDAT)
 
 ![请添加图片描述](https://img-blog.csdnimg.cn/a88a70ccae984174a57064c16e4e4639.png)
 
-### 1.4. Structure Type
+### 1.4. Structure Type 
 #### 1.4.1 Device Scoped Memory Affinity Structure (DSMAS)
 
 > Device Scoped Memory Affinity Structure (DSMAS)
