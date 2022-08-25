@@ -850,6 +850,601 @@ GetCxlAccessInfoCxl20DevCmpat (
 
 ```
 
+### 22. ProgramPciCommandRegister()
+
+- 在CXL DP/UP RCRB 中设置 PCI CMD 寄存器，使能/失能 MMIO 空间。
+
+### 23.  CxlDvsecRegRead()
+
+- 该函数从 DVSEC 寄存器块中读寄存器。设备由 SBDF 定位识别，可能由多个DVSEC 能力寄存器块。每一个块由 DVSEC ID 区分，每一个寄存器块包含一组寄存器，规范中定义了。
+
+```c
+
+/**
+  CxlDvsecRegRead reads register from CXL-device's dvsec register blocks. The CXL device is
+  identified by Socket, Bus, Device and Function numbers. CXL devices may have multiple DVSEC
+  capability register blocks. Each block is identified with Dvsec ID. Each register block
+  contains bunch of registers that are located using offset as defined in CXL spec.
+  It is callers responsibilty to provide accurate device and register information to read
+  the register. Data is returned to the caller in the given data buffer pointer.
+  The last parameter conveys number width of data read request.
+
+  Note: Device(s) - In this context, devices refers to both end point and bridge devices
+                    since both type of devices has DVSEC, this service can be used
+                    regardless of end point or bridge
+					
+					设备被视为 EP 和 桥设备，他们都有 DVSEC。不管是 EP 还是桥都可以使用此服务。
+  Usage Guidance:
+        - For UsraWidth32 read operation, ensure the address to be read is Dword aligned  4字节对齐
+        - For UsraWidth16 read operation, ensure the address to be read is Word aligned   2字节对齐
+        - For UsraWidth8 read operation, no address alignment required                    不用对齐
+
+  @param[in]    SocketId          Socket number under which the device is located
+  @param[in]    Bus               PCI bus number
+  @param[in]    Device            PCI device number
+  @param[in]    Function          PCI function number to be configured
+  @param[in]    DvsecId           Dvsec ID [Eg: 3, 7, 0 and so on]
+  @param[in]    CapRegBlockOffset Offset of register with in DvsecBlock Eg: 0x10 is the offset
+                                  to Alternate Memory Base in Dvsec ID 3. Pass 0x10 to this field
+  @param[in out]Data *            On Input, pointer to buffer to store register value
+                                  On Output, value of the register
+  @param[in]    AccessWidth       Usra defined access width
+
+  @retval       EFI_STATUS        Status returned from Register read API
+                                  EFI_INVALID_PARAMETER callers input is not correct
+                                    Socket, Device or Function input is invalid
+                                  EFI_NOT_FOUND Dvsec Id is not available
+**/
+EFI_STATUS
+CxlDvsecRegRead (
+  IN  UINT8   Socket,
+  IN  UINT8   Bus,
+  IN  UINT8   Device,
+  IN  UINT8   Function,
+  IN  UINT8   DvsecId,
+  IN  UINT8   CapRegBlockOffset,
+  OUT VOID    *Data,
+  IN  USRA_ACCESS_WIDTH   AccessWidth
+  )
+{
+  USRA_ADDRESS        PciAddress;
+  EFI_STATUS          Status;
+
+  if (Socket >= MAX_SOCKET || Device > 31 || Function > 7) {
+    DEBUG ((DEBUG_ERROR, "Invalid device information Check Socket:%d-Dev:%d-Func:%d\n", Socket, Device, Function));
+    return EFI_INVALID_PARAMETER;
+  }
+
+  // 通过 SBDF 得到 PCIe 物理地址 
+  GenerateBasePciePhyAddress (Socket, Bus, Device, Function, UsraWidth32, &PciAddress);
+  CXL_DEBUG_LOG ("\t\t\tAddress To search for Dvsec = %X in Seg %x\n", PciAddress.dwRawData[0], Socket);
+
+  // 找到　DvsecId　指定的 DVSEC　偏移
+  PciAddress.Pcie.Offset = FindCxlDvsecCapability (
+    &PciAddress,
+    DvsecId
+    );
+
+  if (PciAddress.Pcie.Offset == 00) {
+    CXL_DEBUG_LOG ("\t\t\tDvsec %d is not present in Bus:%X-Dev:%X-Fun:%X 4K PCI config space\n",\
+                    DvsecId, Bus, Device, Function);
+    return EFI_NOT_FOUND;
+  }
+
+  CXL_DEBUG_LOG ("\t\t\tDvsec %x located in offset %X\n", DvsecId, PciAddress.Pcie.Offset);
+  PciAddress.Attribute.AccessWidth = AccessWidth;
+  PciAddress.Pcie.Offset += CapRegBlockOffset;
+  
+  // 寄存器讀操作
+  Status = RegisterRead (&PciAddress, Data);
+
+  if (EFI_ERROR(Status)) {
+    DEBUG ((DEBUG_ERROR, "\t%r error while reading %X add\n", Status, PciAddress.dwRawData[0]));
+  }  else {
+    // 成功，日志打印
+    switch (AccessWidth) {
+      case UsraWidth8:
+        CXL_DEBUG_LOG ("\t\t\tValue %X Read from Add %X\n", *(UINT8 *)Data, PciAddress.dwRawData[0]);
+        break;
+      case UsraWidth16:
+        CXL_DEBUG_LOG ("\t\t\tValue %X Read from Add %X\n", *(UINT16 *)Data, PciAddress.dwRawData[0]);
+        break;
+      case UsraWidth32:
+        CXL_DEBUG_LOG ("\t\t\tValue %X Read from Add %X\n", *(UINT32 *)Data, PciAddress.dwRawData[0]);
+        break;
+      default:
+        CXL_DEBUG_LOG ("\t\t\tInvalid Access Width\n");
+    }
+  }
+  return Status;
+}
+
+```
+
+### 24. CxlDvsecRegWrite()
+
+- DVSEC 寄存器块中的寄存器写操作，与前一个读基本一致；
+
+### 25. CxlDvsecRegAndThenOr()
+
+- 调用 CxlDvsecRegRead() -> 与or或数据 -> CxlDvsecRegWrite(),执行 DVSEC 寄存器位操作；
+
+### 26. GetCxlPortType()
+![请添加图片描述](https://img-blog.csdnimg.cn/87ca8c79f2014a4db152a825cdd234b9.png)
+- 确定给定的设备是 CXL2.0 还是 CXL1.1 设备，不是CXL设备返回 NON-CXL.
+
+```c 
+
+/**
+  GetCxlPortType finds whether given pci device is a cxl2p0 or cxl11 device. For non-CXL
+  devices, it returns NON-CXL
+
+  @param[in]    SocketId          Socket number under which the device is located
+  @param[in]    Bus               PCI bus number
+  @param[in]    Device            PCI device number
+  @param[in]    Function          PCI function number
+
+  @retval PortType Value: Meaning
+                      02: CXL20
+                      01: CXL11
+                      FF: Non-CXL Port
+**/
+UINT8
+GetCxlPortType (
+  IN  UINT8 SocketId,
+  IN  UINT8 Bus,
+  IN  UINT8 Device,
+  IN  UINT8 Function
+  )
+{
+  UINT8                                           PortType;
+  UINT8                                           CapRegBlockOffset;
+  EFI_STATUS                                      Status;
+  PCI_EXPRESS_DESIGNATED_VENDOR_SPECIFIC_HEADER_1 DvsecHeader1;
+
+  PortType = UNKNOWN_PORT;
+  CapRegBlockOffset = 00;
+  CXL_DEBUG_LOG ("\t%a for Soc %d, Bus %x, Dev %x, Fun %d\n", __FUNCTION__, SocketId, Bus,\
+                  Device, Function);
+  CapRegBlockOffset = OFFSET_OF(CXL_2_0_DVSEC_FLEX_BUS_PORT, DesignatedVendorSpecificHeader1);
+  // 读 CXL_FLEX_BUS_PORT_DVSEC 寄存器 DesignatedVendorSpecificHeader1
+  Status = CxlDvsecRegRead (SocketId, Bus, Device, Function, CXL_FLEX_BUS_PORT_DVSEC,\
+                            CapRegBlockOffset, &DvsecHeader1.Uint32, UsraWidth32);
+  CXL_DEBUG_LOG ("\t\tValue of Dvsec 7 Header1 (Offset: %x) = %X\n", CapRegBlockOffset,\
+                  DvsecHeader1.Uint32);
+
+  if (EFI_ERROR(Status)) {
+    CXL_DEBUG_LOG ("\t\t%r returned by CxlDvsecRegRead\n", Status);
+    PortType = UNKNOWN_PORT;
+    return PortType;
+  }
+
+  CXL_DEBUG_LOG ("\t\tDvsec ID 7 VenId = %x\n\t\tRevision = %x\n",\
+                  DvsecHeader1.Bits.DvsecVendorId, DvsecHeader1.Bits.DvsecRevision);
+  CXL_DEBUG_LOG ("\t\tThis is %s port\n", (DvsecHeader1.Bits.DvsecRevision == 1? L"CXL20": L"CXL11"));
+
+  // ref CXL 2.0 Table 140. PCI Express DVSEC Header Registers Settings for Flex Bus Port
+  if (DvsecHeader1.Bits.DvsecRevision == 1) {
+    PortType = CXL20_PORT;
+  }  else {
+    PortType = CXL11_PORT;
+  }
+  return PortType;
+}
+
+```
+
+### 27. GetCxl20PortOperatingMode()
+![请添加图片描述](https://img-blog.csdnimg.cn/198a8e75d34b49a68fd5d2a6aad43ab5.png)
+
+- 确定 CXL2.0 端口的工作模式。如果给定设备不是 CXL2.0 端口，则返回未知模式。这个用在调用者需要知道2.0端口是工作在2.0模式还是1.1模式。 
+
+```c 
+
+/**
+  GetCxl20PortOperatingMode finds CXL 20 port's operating mode. if the given device is
+  not CXL20 port, Unknown mode is returned. This can be used in a situation where the caller
+  needs to be know if the CXL20 port is operating in 20 or 11 mode
+
+  Prerequisite: This function assumes the given port is CXL20 port.
+
+  @param[in]    SocketId          Socket number under which the device is located
+  @param[in]    Bus               PCI bus number
+  @param[in]    Device            PCI device number
+  @param[in]    Function          PCI function number
+
+  @retval PortType Value: Meaning
+                      02: CXL20 Mode
+                      01: CXL11 Mode
+                      FF: Non-Cxl2p0 Port
+**/
+UINT8
+GetCxl20PortOperatingMode (
+  IN  UINT8   SocketId,
+  IN  UINT8   Bus,
+  IN  UINT8   Device,
+  IN  UINT8   Function
+  )
+{
+  UINT8                               Data8;
+  UINT8                               CapRegBlockOffset;
+  EFI_STATUS                          Status;
+  CXL_2_0_DVSEC_FLEX_BUS_PORT_STATUS  PortStatusReg;
+
+  CXL_DEBUG_LOG ("\t%a for Soc %d, Bus %x Dev %x Fun %d\n",\
+                  __FUNCTION__, SocketId, Bus, Device, Function);
+  CapRegBlockOffset = OFFSET_OF(CXL_2_0_DVSEC_FLEX_BUS_PORT, PortStatus);
+  
+  // 读 CXL_2_0_DVSEC_FLEX_BUS_PORT 寄存器 PortStatus 值
+  Status = CxlDvsecRegRead (SocketId, Bus, Device, Function, CXL_FLEX_BUS_PORT_DVSEC, CapRegBlockOffset,\
+                            &PortStatusReg.Data16, UsraWidth16);
+  if (EFI_ERROR(Status)) {
+    DEBUG ((DEBUG_ERROR, "\tNon Cxl 20 port. Do not check operating mode\n"));
+    return 0xFF;
+  }
+
+  // CXL2p0_Enabled 如果为1表明 CXL2.0 协议已经使能
+  // ref CXL 2.0 8.2.1.3.3 DVSEC Flex Bus Port Status (Offset 0Eh)
+  if (PortStatusReg.Bits.Cxl2p0Enable == 0) {
+    Data8 = CXL11_MODE;
+  } else {
+    Data8 = CXL20_MODE;
+  }
+  CXL_DEBUG_LOG ("\tCxl20 port is operating in %s\n", (PortStatusReg.Bits.Cxl2p0Enable)?L"CXL2p0":L"CXL11");
+
+  return Data8;
+}
+
+```
+
+### 28. RcrbDvsecRegBlockRead()
+
+- 读 DVSEC 块寄存器的值。找到寄存器偏移 -> RCRB 读寄存器；
+
+### 29. RcrbDvsecRegBlockWrite()
+
+- 写　DVSEC　块寄存器。
+
+### 30. RcrbDvsecRegBlockAndThenOr()
+
+- DVSEC　块寄存器的位操作： AndData32\OrData32
+
+### 31. GetCxlRegisterBlockBaseAddress()
+![请添加图片描述](https://img-blog.csdnimg.cn/3d801138f4e144b193da8eb17215ea38.png)
+
+- 返回 CXL 寄存器块的基地址。CXL 设备由不同种类的寄存器块，比如组件寄存器、BAR 虚拟ACL 寄存器等。Refer: CXL 2.0 spec rev 1.0 section 8.1.9 
+
+```c
+
+/**
+  GetCxlRegisterBlockBaseAddress returns CXL register block base address. CXL devices has
+  different kinds of register blocks. Say Components Registers, BAR Virtualization ACL Registers
+  and so on. Refer: CXL 2.0 spec rev 1.0 section 8.1.9
+
+  @param[in]  Socket            Socket number under which the device is located
+  @param[in]  Bus               PCI bus number
+  @param[in]  Device            PCI device number
+  @param[in]  Function          PCI function number
+  @param[in]  RegBlockId        Register Block ID
+                                  00 - Invalid Id/Empty Register Block
+                                  01 - Component Registers
+                                  02 - BAR Virtualization ACL Registers
+                                  03 - CXL Memory Devices
+                                  04 - 255 - Invalid
+
+  @retval     Register Block's Base Address
+**/
+UINT64
+GetCxlRegisterBlockBaseAddress (
+  IN  UINT8   Socket,
+  IN  UINT8   Bus,
+  IN  UINT8   Device,
+  IN  UINT8   Function,
+  IN  UINT8   RegBlockId
+  )
+{
+  UINT8       i;
+  UINT8       NumberOfRegBlocks;
+  UINT8       BarOffset;
+  UINT32      HighBarOffset;
+  EFI_STATUS  Status;
+  UINT32      Data32;
+  UINT64      RegBlockBaseAddress;
+  USRA_ADDRESS        PciAddress;
+  PCI_EXPRESS_DESIGNATED_VENDOR_SPECIFIC_HEADER_1  Header;
+  CXL20_REGISTER_LOCATOR_DVSEC_REGISTER_BASE_LOW RegBlockOffsetLow;
+
+  RegBlockBaseAddress = 0;
+  CXL_DEBUG_LOG ("\t\t\tRead Register Block Id %d for Device Seg: %x, Bus: %x, Dev%x, Fun:%x\n",\
+                    RegBlockId, Socket, Bus, Device, Function);
+  // 要返回的 Register Block ID 参数范围检查，只能位 1，2，3
+  if (RegBlockId == 00 || RegBlockId > 3) {
+    CXL_DEBUG_LOG ("\t\r\rIncorrect Block Id = %d - Exit without reading Bar\n", RegBlockId);
+    return RegBlockBaseAddress;
+  }
+  
+  //
+  //Read DVSEC length
+  // 读 CXL_REGISTER_LOCATOR_DVSEC 寄存器
+  // 其中参数：CXL_REGISTER_LOCATOR_DVSEC 指定DVSEC; 0x4 : 寄存器偏移，读Header1；存入 Header.Uint32
+  
+  Status = CxlDvsecRegRead (Socket, Bus, Device, Function, CXL_REGISTER_LOCATOR_DVSEC,
+                            0x04, &Header.Uint32, UsraWidth32);
+  if (EFI_ERROR(Status)) {
+    CXL_DEBUG_LOG ("\t\t\t%r error while reading Register Locator Dvsec register block\n");
+    return RegBlockBaseAddress;
+  }
+
+  GenerateBasePciePhyAddress (Socket, Bus, Device, Function, UsraWidth32, &PciAddress);
+  
+  // The DVSEC Length field must be set to h (0Ch+ n * 8) bytes to accommodate the registers included in the DVSEC, where n is the number of Register Blocks described by this Capability. The DVSEC ID must be set to 08h to advertise that this is a CXL 2.0 Register Locator DVSEC capability structure.
+  // ref CXL 2.0 spec Figure 131. Register Locator DVSEC with 3 Register Block Entries
+  // 减掉前面的长度 0xC，每个寄存器 Offset 占用8字节
+  NumberOfRegBlocks = (UINT8)(Header.Bits.DvsecLength - 0xC) / 8;
+  CXL_DEBUG_LOG ("\t\t\tNumberOfRegBlocks = %d\n", NumberOfRegBlocks);
+
+  for (i = 0; i < NumberOfRegBlocks; i++) {
+  
+    // 遍历寄存器地址信息 Register Block Low Offset
+    BarOffset = OFFSET_OF(CXL_2_0_REGISTER_LOCATOR_DVSEC, RegisterBaseLowRegisterBlock1) + i * 8;
+	
+	// 读 Register Offset Low 内容
+    Status = CxlDvsecRegRead (Socket, Bus, Device, Function, CXL_REGISTER_LOCATOR_DVSEC,
+                              BarOffset, &RegBlockOffsetLow.Data32, UsraWidth32);
+    if (EFI_ERROR (Status)) {
+      CXL_DEBUG_LOG("\t\t\t%r error while reading Register Locator Dvsec register block\n");
+      return RegBlockBaseAddress;
+    }
+
+    // BlockIdentifier要匹配， RegisterBIR 要合法： 0 - 5 6个BAR
+	
+    if (RegBlockOffsetLow.Bits.RegisterBlockIdentifier == RegBlockId && RegBlockOffsetLow.Bits.RegisterBIR < 6) {
+      
+	  // ref CXL 2.0 spec 8.1.9.1 Register Offset Low (Offset Varies)
+	  // Register BIR - Indicates which one of a Function's Base Address Registers, located beginning at 10h in Configuration Space
+	  // Register Block Identifier - Identifies the type of CXL registers.
+	  // 计算偏移，从 0x10 开始，bar0 位于 0x10
+	  
+	  PciAddress.Pcie.Offset = 0x10 + (RegBlockOffsetLow.Bits.RegisterBIR * 4);
+	  // 读出块寄存器基地址, BAR 寄存器只存储一个地址
+      Status = RegisterRead(&PciAddress, &Data32);
+      if (EFI_ERROR (Status)) {
+        CXL_DEBUG_LOG ("\t\t\t%r error while reading Register Pci Bar (low 32 bits)\n", Status);
+        return RegBlockBaseAddress;
+      }
+	  // regBlock 基地址
+      RegBlockBaseAddress = (UINT64)(Data32 & ~0xF);  // Clear out BAR register attributes field
+
+      if ((Data32 & 0x7) == 0x4) {
+	    // BAR 空间数据低位解析： 2:1 -> 00 : 32bit decoding 10 : 64bit decoding;  0 -> 0 : Memory request 1 : IO request
+        // 
+        // 64-bit MMIO BAR
+        // 把地址高位读出来
+        PciAddress.Pcie.Offset += 4;
+        Status = RegisterRead(&PciAddress, &Data32);
+        if (EFI_ERROR (Status)) {
+          CXL_DEBUG_LOG ("\t\t\t%r error while reading Register Pci Bar (high 32 bits)\n", Status);
+          return RegBlockBaseAddress;
+        }
+		// 组合成64位地址
+        RegBlockBaseAddress |= LShiftU64 ((UINT64) Data32, 32);
+      }
+
+      // 计算出基地址之后，寄存器块可能在这一块空间的某一处开始，有一个偏移，需要将这个偏移加上；偏移记录在 DVSEC 中
+      // Read High Offset
+      Status = CxlDvsecRegRead (Socket, Bus, Device, Function, CXL_REGISTER_LOCATOR_DVSEC,
+                              BarOffset + 4, &HighBarOffset, UsraWidth32);
+      if (EFI_ERROR (Status)) {
+        CXL_DEBUG_LOG("\t\t\t%r error while reading Register Locator Dvsec register block\n");
+        return RegBlockBaseAddress;
+      }
+	  // 基地址加上高低64位偏移，得出最后的寄存器块起始地址
+      RegBlockBaseAddress += LShiftU64(HighBarOffset, 32);
+      RegBlockBaseAddress += RegBlockOffsetLow.Data32 & 0xFFFF0000;
+      break;
+    }
+  }
+  return RegBlockBaseAddress;
+}
+
+```
+![请添加图片描述](https://img-blog.csdnimg.cn/f60a2b46105c4ce882eff887c1cc2ca6.png)
+![请添加图片描述](https://img-blog.csdnimg.cn/2fb626b9ac6647aea880a308fbcb8794.png)
+
+### 32. GetCxlCacheMemCapIdBase()
+![请添加图片描述](https://img-blog.csdnimg.cn/840cdda9ebcc4856ab422286ffb9c95b.png)
+
+- 在 cache and mem sub system component register block 中得到 capability 的基地址
+
+```c 
+
+/*
+  GetCxlCacheMemCapIdBase function gets base address of capability in cache and mem
+  sub system component register block.
+  It takes Cache Mem component register base as input to look for CapId.
+
+  @param[in]    CacheMemBase  BaseAddress where cache and mem comp registers are located
+  @param[in]    CacheMemBase  Capability Id to locate
+
+  @retval       BaseAddress   Mmio Base address of CapId
+                              00 CapId not found or invalid input
+*/
+UINT64
+GetCxlCacheMemCapIdBase (
+  IN  UINTN   CompRegCacheMemBase,
+  IN  UINT16  CapId
+  )
+{
+  CXL_2_0_CXL_CAP_HEADER_REG      CxlCapHeader;
+  CXL_2_0_CXL_CAP_GENERIC_HEADER  CxlCapGenHeader;
+  UINT8 Index;
+
+  // 首先检查两个参数是否合法， CompRegCacheMemBase 基地址合法
+  if ((CompRegCacheMemBase == 00 || CompRegCacheMemBase == 0xFFFFFFFF)) {
+    DEBUG ((DEBUG_ERROR, "Invalid Input Base Address = %x\n", CompRegCacheMemBase));
+    return 0x00;
+  }
+  
+  // CapId 不能大于 8 
+  if (CapId >= CxlCompMaxCap) {
+    DEBUG ((DEBUG_ERROR, "Invalid Input CapId=%x\n", CapId));
+    return 0x00;
+  }
+
+  //
+  // Read CXL Cap Register Header. This is the first Cap register and it's Id must be 1
+  // 读 CXL Capability Header Register, 第一个寄存器， Capability_ID 等必须为 1
+  // ref CXL 2.0 8.2.5.1 CXL Capability Header Register (Offset 0x0)
+  CxlCapHeader.Data32 = MmioRead32 (CompRegCacheMemBase);
+  if ((CxlCapHeader.Bits.CxlCapId != 0x01) || \
+      (CxlCapHeader.Bits.CxlCapVer != 0x01) || \
+      (CxlCapHeader.Bits.CxlCacheMemVer != 0x01)) {
+    DEBUG ((DEBUG_ERROR, "\t\t\t%X Invalid Cxl Comp Register block\n", CompRegCacheMemBase));
+    return 00;
+  } else {
+    // 返回第一个寄存器的地址, 就是首地址
+    if (CapId == CxlCapHeader.Bits.CxlCapId) {
+      return CompRegCacheMemBase;
+    }
+  }
+
+  Index = 1;
+  // 从 1 开始 遍历，跳过 CXL_Capability_Header 计算地址
+  // Each element is 1 DWORD in size and is located contiguous with previous elements
+  // 元素连续，ArraySize 表示元素数量，不包含 CXL_Capability_Header，每个元素 4 个字节
+  while(Index <= CxlCapHeader.Bits.ArraySize) {
+    CxlCapGenHeader.Data32 = MmioRead32 (CompRegCacheMemBase + Index * 4);
+    if (CapId == CxlCapGenHeader.Bits.CxlCapId) {
+	  // 匹配成功，CxlCapPtr 表示相对于起始地址的偏移，加上返回即可
+      CompRegCacheMemBase += CxlCapGenHeader.Bits.CxlCapPtr;
+      return CompRegCacheMemBase;
+    }
+    Index ++;
+  }
+  return 0x00;
+}
+
+```
+
+![请添加图片描述](https://img-blog.csdnimg.cn/a24a249f97554f949ae3718fed059b7e.png)
+![请添加图片描述](https://img-blog.csdnimg.cn/d3f09e72baec4c33ab9a865b44d1bc32.png)
+
+### 33. GetCxlCacheMemCompSubSysCapBasegBdf()
+
+- 该函数使用 BDF 从 cache and mem subsystem component register block 中得到 capability 基地址；
+- 调用 GetCxlRegisterBlockBaseAddress() 得到组件寄存器块基地址 -> 得到基地址加4K -> 使用地址与 GetCxlCacheMemCapIdBase() 得到 capabilities 基地址。
+
+### 34. GetCxlSubSysCacheMemCompRegRcrb()
+![请添加图片描述](https://img-blog.csdnimg.cn/0e8b4b5560c6461d95a4b2a79ce5c7eb.png)
+
+- CXL 1.1 组件寄存器位置由 64位 MEMBAR0 寄存器指定，在 RCRB 0x10和 0x14处；与前一个函数相比，就是组件寄存器首地址获取方式不一样；
+- 从 CacheMem comp register block 得到特定 capabilities 寄存器块基地址；
+
+### 35. ConfigureSecComp()
+![请添加图片描述](https://img-blog.csdnimg.cn/bef51bdd44894499adf2b729dc1291ce.png)
+
+- 配置CXL 设备的可信级别，由 BIOS 设置自定义
+
+### 36. ConfigureCxlCompRegsRcrb()
+
+- 配置组件寄存器，目前只有设备可信级别
+- 获取寄存器基地址方式从 RCRB 获取，适用于 CXL1.1 设备
+
+```c
+
+/*
+  ConfigureCxlCompRegsRcrb configures CXL1.1 USP and DSP component registers using
+  Rcrb Base address. CXL component registers (Refer: CXL 2.0 spec Revsion 0 Section: 8.2.3)
+  are sub divided into multiple subsystem component registers. This function targetted to
+  configure all subsystem registers. Currently .cache and .mem registers' security level
+  is configured. When the scope is extended, header should be updated to reflect new scope.
+  GetCxlSubSysCacheMemCompRegRcrb function used to get particular capability from cahe and mem
+  sub component registers. Each capabailty is identified using Capability ID. This function takes
+  cap Id as input to get capabilities base address. Refer CXL_COM_REG_CAP_ID enum for cap Id
+  definitions.
+
+  @param [in]   *KtiInternalGlobal
+  @param [in]   RcrbBase            RcrbBase address of CXL 1.1 USP or DSP
+
+  @retval       None
+*/
+VOID
+ConfigureCxlCompRegsRcrb (
+  IN  KTI_HOST_INTERNAL_GLOBAL  *KtiInternalGlobal,
+  IN  UINT32  RcrbBase
+  )
+{
+  UINT8   CxlSecLvl;
+  UINT32  BaseAddress;
+
+  CxlSecLvl = CXL_SECURITY_FULLY_TRUSTED;
+  // CXL_SECURITY_AUTO=3
+  if (KTISETUP->DfxParm.DfxCxlSecLvl < CXL_SECURITY_AUTO) {
+    // 获取安全级别
+    CxlSecLvl = KTISETUP->DfxParm.DfxCxlSecLvl;
+  }
+  // 得到 CxlCompSecCap=3 的基地址
+  BaseAddress = (UINT32)GetCxlSubSysCacheMemCompRegRcrb (RcrbBase, CxlCompSecCap);
+  CXL_DEBUG_LOG ("\t\t\tSec cap Base Address = %X\n", BaseAddress);
+  if(BaseAddress == 0) {
+    CXL_DEBUG_LOG ("\t\t\tNo Cxl Sec Comp Regs\n");
+    return;
+  }
+  // 调用上一个函数进行安全配置
+  ConfigureSecComp (BaseAddress, CxlSecLvl);
+}
+
+```
+
+
+### 37. ConfigureCxlCompRegsBDF()
+
+- 与上一个函数功能相同，只有获取寄存器基地址方式不同，使用 BDF 访问设备，遍历DVSEC，寻找组件寄存器；适用于 CXL 2.0 设备；
+
+### 38. IsCxl20DevOpInCxl11Mode()
+
+- 常规确认是否是 2.0设备工作在 1.1 模式下；
+
+```c
+
+/**
+  Routine to determin if it is a CXL 2.0 device operating in 1.1 Mode.
+
+  @param[in]  Socket              Socket Index
+  @param[in]  Stack               Stack number
+
+  @retval TRUE    - It is a CXL 2.0 device operating in 1.1 Mode.
+  @retval FALSE   - It is NOT a CXL 2.0 device operating in 1.1 Mode.
+**/
+BOOLEAN
+EFIAPI
+IsCxl20DevOpInCxl11Mode (
+  IN  UINT8                     Socket,
+  IN  UINT8                     Stack
+  )
+{
+  UINT32          RcrbBaseAddr;
+
+  // 得到 DP RCRB 基地址
+  RcrbBaseAddr = (UINT32) GetRcrbBar (Socket, Stack, TYPE_CXL_RCRB);
+  ASSERT (RcrbBaseAddr != 0);
+  // UP RCRB 基地址
+  RcrbBaseAddr += CXL_RCRB_BAR_SIZE_PER_PORT;
+
+  //
+  // Workaround for Reynolds Rock A0, do 2 accesses to RCRBBAR space in all cases and treat the 2nd access as reliable.
+  //
+  MmioRead32 (RcrbBaseAddr);
+
+  //If the return data is all 1, assume this is a CXL 2.0 device operating in 1.1 mode
+  if (MmioRead32 (RcrbBaseAddr) == 0xFFFFFFFF) {
+    return TRUE;
+  } else {
+    return FALSE;
+  }
+}
+
+```
 
 ## 参考
 - Compute Express Link Specification Revision 2.0
